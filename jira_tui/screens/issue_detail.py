@@ -1,0 +1,355 @@
+from __future__ import annotations
+from textual.app import ComposeResult
+from textual.screen import Screen
+from textual.widgets import Button, Footer, Input, Label, Markdown, Select, Static, TextArea
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
+from textual.binding import Binding
+from textual import work
+from ..client import JiraClient
+
+
+PRIORITY_ICONS = {"Highest": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🔵", "Lowest": "⚪"}
+STATUS_COLORS = {"To Do": "blue", "In Progress": "yellow", "Done": "green", "Closed": "green"}
+
+
+class CommentBox(Vertical):
+    """Single comment rendered as a self-contained widget with compose()."""
+
+    DEFAULT_CSS = """
+    CommentBox {
+        background: $surface;
+        border: round $panel;
+        margin-bottom: 1;
+        padding: 1;
+    }
+    """
+
+    def __init__(self, author: str, date: str, body: str):
+        super().__init__()
+        self._author = author
+        self._date = date
+        self._body = body
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"[bold cyan]{self._author}[/]  [dim]{self._date}[/]")
+        yield Static(self._body or "_(empty)_")
+
+
+class IssueDetailScreen(Screen):
+    BINDINGS = [
+        Binding("escape", "app.pop_screen", "Back", show=True),
+        Binding("t", "transition", "Transition", show=True),
+        Binding("c", "comment", "Comment", show=True),
+        Binding("e", "edit_summary", "Edit Summary", show=True),
+        Binding("r", "refresh", "Refresh", show=True),
+    ]
+
+    CSS = """
+    IssueDetailScreen {
+        background: $background;
+    }
+    #detail-header {
+        height: 3;
+        background: $surface;
+        border-bottom: solid $accent;
+        padding: 0 2;
+        content-align: left middle;
+    }
+    #detail-key {
+        color: $accent;
+        text-style: bold;
+        margin-right: 2;
+    }
+    #detail-summary {
+        text-style: bold;
+    }
+    #meta-bar {
+        height: 3;
+        background: $surface-darken-1;
+        padding: 0 2;
+        border-bottom: solid $panel;
+    }
+    .meta-item {
+        margin-right: 3;
+        content-align: left middle;
+    }
+    #body-container {
+        height: 1fr;
+    }
+    #description-panel {
+        width: 2fr;
+        border-right: solid $panel;
+        padding: 1 2;
+    }
+    #right-panel {
+        width: 1fr;
+        padding: 1 2;
+    }
+    .section-title {
+        text-style: bold;
+        color: $accent;
+        margin-bottom: 1;
+        border-bottom: solid $panel;
+    }
+    .comment-box {
+        background: $surface;
+        border: round $panel;
+        margin-bottom: 1;
+        padding: 1;
+    }
+    .comment-author {
+        text-style: bold;
+        color: $accent;
+    }
+    .comment-date {
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, client: JiraClient, issue_key: str, **kwargs):
+        super().__init__(**kwargs)
+        self._client = client
+        self._issue_key = issue_key
+        self._issue = None
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"Loading {self._issue_key}…", id="detail-header")
+        yield Horizontal(id="meta-bar")
+        with Horizontal(id="body-container"):
+            with ScrollableContainer(id="description-panel"):
+                yield Static("Description", classes="section-title")
+                yield Markdown("", id="description-md")
+            with ScrollableContainer(id="right-panel"):
+                yield Static("Comments", classes="section-title")
+                yield Vertical(id="comments-list")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._load_issue()
+
+    @work(thread=True)
+    def _load_issue(self) -> None:
+        try:
+            issue = self._client.get_issue(self._issue_key)
+            comments = self._client.get_comments(self._issue_key)
+            self.app.call_from_thread(self._populate, issue, comments)
+        except Exception as e:
+            self.app.call_from_thread(
+                self.query_one("#detail-header", Static).update,
+                f"Error loading {self._issue_key}: {e}"
+            )
+
+    def _populate(self, issue, comments) -> None:
+        self._issue = issue
+        f = issue.fields
+
+        key = issue.key
+        summary = f.summary or ""
+        status = getattr(f.status, "name", "?")
+        priority = getattr(f.priority, "name", "?") if f.priority else "?"
+        assignee = getattr(f.assignee, "displayName", "Unassigned") if f.assignee else "Unassigned"
+        reporter = getattr(f.reporter, "displayName", "?") if f.reporter else "?"
+        itype = getattr(f.issuetype, "name", "?") if f.issuetype else "?"
+
+        icon = PRIORITY_ICONS.get(priority, "•")
+
+        self.query_one("#detail-header", Static).update(
+            f"[bold cyan]{key}[/]  [bold]{summary}[/]"
+        )
+
+        meta = self.query_one("#meta-bar", Horizontal)
+        meta.remove_children()
+        meta.mount(Static(f"[bold]{itype}[/]", classes="meta-item"))
+        meta.mount(Static(f"Status: [yellow]{status}[/]", classes="meta-item"))
+        meta.mount(Static(f"Priority: {icon} {priority}", classes="meta-item"))
+        meta.mount(Static(f"Assignee: [cyan]{assignee}[/]", classes="meta-item"))
+        meta.mount(Static(f"Reporter: {reporter}", classes="meta-item"))
+
+        desc = getattr(f, "description", None) or "_No description_"
+        self.query_one("#description-md", Markdown).update(desc)
+
+        comments_list = self.query_one("#comments-list", Vertical)
+        comments_list.remove_children()
+        if not comments:
+            comments_list.mount(Static("No comments yet.", classes="comment-date"))
+        else:
+            for c in comments:
+                author = getattr(c.author, "displayName", "?")
+                date = str(c.created)[:10]
+                body = c.body or ""
+                comments_list.mount(CommentBox(author, date, body))
+
+    def action_transition(self) -> None:
+        if not self._issue:
+            return
+        self.app.push_screen(TransitionModal(self._client, self._issue_key), self._on_transitioned)
+
+    def _on_transitioned(self, _) -> None:
+        self._load_issue()
+
+    def action_comment(self) -> None:
+        self.app.push_screen(CommentModal(self._client, self._issue_key), self._on_commented)
+
+    def _on_commented(self, _) -> None:
+        self._load_issue()
+
+    def action_edit_summary(self) -> None:
+        if not self._issue:
+            return
+        self.app.push_screen(
+            EditSummaryModal(self._client, self._issue_key, self._issue.fields.summary),
+            self._on_edited,
+        )
+
+    def _on_edited(self, _) -> None:
+        self._load_issue()
+
+    def action_refresh(self) -> None:
+        self._load_issue()
+
+
+# ── Modal dialogs ─────────────────────────────────────────────────────────────
+
+class TransitionModal(Screen):
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+
+    CSS = """
+    TransitionModal { align: center middle; }
+    #modal-box { width: 50; height: auto; border: round $accent; padding: 1 2; background: $surface; }
+    .modal-title { text-align: center; text-style: bold; color: $accent; margin-bottom: 1; }
+    #cancel-row { height: 3; align: center middle; margin-top: 1; }
+    """
+
+    def __init__(self, client: JiraClient, issue_key: str, **kwargs):
+        super().__init__(**kwargs)
+        self._client = client
+        self._issue_key = issue_key
+
+    def compose(self) -> ComposeResult:
+        with Container(id="modal-box"):
+            yield Static(f"Transition  {self._issue_key}", classes="modal-title")
+            yield Static("Loading transitions…", id="transitions-area")
+            with Horizontal(id="cancel-row"):
+                yield Button("Cancel [Esc]", variant="error", id="btn-cancel")
+
+    def on_mount(self) -> None:
+        self._load()
+
+    @work(thread=True)
+    def _load(self) -> None:
+        transitions = self._client.get_transitions(self._issue_key)
+        self.app.call_from_thread(self._populate, transitions)
+
+    def _populate(self, transitions) -> None:
+        area = self.query_one("#transitions-area", Static)
+        area.remove()
+        cancel_row = self.query_one("#cancel-row", Horizontal)
+        container = self.query_one("#modal-box", Container)
+        for t in transitions:
+            btn = Button(t["name"], id=f"tr-{t['id']}", variant="default")
+            btn.styles.margin = (0, 0, 1, 0)
+            container.mount(btn, before=cancel_row)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        btn_id = event.button.id or ""
+        if btn_id == "btn-cancel":
+            self.dismiss(None)
+        elif btn_id.startswith("tr-"):
+            transition_id = btn_id[3:]
+            try:
+                self._client.transition_issue(self._issue_key, transition_id)
+                self.app.notify(f"Transitioned {self._issue_key}", severity="information")
+            except Exception as e:
+                self.app.notify(f"Error: {e}", severity="error")
+            self.dismiss(True)
+
+
+class CommentModal(Screen):
+    BINDINGS = [
+        Binding("escape", "app.pop_screen", "Cancel"),
+        Binding("ctrl+s", "submit", "Submit"),
+    ]
+
+    CSS = """
+    CommentModal { align: center middle; }
+    #modal-box { width: 70; height: 20; border: round $accent; padding: 1 2; background: $surface; }
+    .modal-title { text-align: center; text-style: bold; color: $accent; margin-bottom: 1; }
+    #comment-area { height: 10; }
+    #btn-row { height: 3; align: center middle; margin-top: 1; }
+    """
+
+    def __init__(self, client: JiraClient, issue_key: str, **kwargs):
+        super().__init__(**kwargs)
+        self._client = client
+        self._issue_key = issue_key
+
+    def compose(self) -> ComposeResult:
+        with Container(id="modal-box"):
+            yield Static(f"Add Comment to {self._issue_key}", classes="modal-title")
+            yield TextArea(id="comment-area")
+            with Horizontal(id="btn-row"):
+                yield Button("Submit [Ctrl+S]", variant="primary", id="submit-btn")
+                yield Button("Cancel [Esc]", variant="error", id="cancel-btn")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "submit-btn":
+            self.action_submit()
+        elif event.button.id == "cancel-btn":
+            self.dismiss(None)
+
+    def action_submit(self) -> None:
+        body = self.query_one("#comment-area", TextArea).text.strip()
+        if not body:
+            self.app.notify("Comment cannot be empty", severity="warning")
+            return
+        try:
+            self._client.add_comment(self._issue_key, body)
+            self.app.notify("Comment added", severity="information")
+            self.dismiss(True)
+        except Exception as e:
+            self.app.notify(f"Error: {e}", severity="error")
+
+
+class EditSummaryModal(Screen):
+    BINDINGS = [Binding("escape", "app.pop_screen", "Cancel")]
+
+    CSS = """
+    EditSummaryModal { align: center middle; }
+    #modal-box { width: 70; height: auto; border: round $accent; padding: 1 2; background: $surface; }
+    .modal-title { text-align: center; text-style: bold; color: $accent; margin-bottom: 1; }
+    #btn-row { height: 3; align: center middle; margin-top: 1; }
+    """
+
+    def __init__(self, client: JiraClient, issue_key: str, current_summary: str, **kwargs):
+        super().__init__(**kwargs)
+        self._client = client
+        self._issue_key = issue_key
+        self._current = current_summary
+
+    def compose(self) -> ComposeResult:
+        with Container(id="modal-box"):
+            yield Static(f"Edit Summary — {self._issue_key}", classes="modal-title")
+            yield Input(value=self._current, id="summary-input")
+            with Horizontal(id="btn-row"):
+                yield Button("Save", variant="primary", id="save-btn")
+                yield Button("Cancel", variant="error", id="cancel-btn")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "save-btn":
+            self._save()
+        else:
+            self.dismiss(None)
+
+    def on_input_submitted(self, _) -> None:
+        self._save()
+
+    def _save(self) -> None:
+        summary = self.query_one("#summary-input", Input).value.strip()
+        if not summary:
+            return
+        try:
+            self._client.update_issue(self._issue_key, {"summary": summary})
+            self.app.notify("Summary updated", severity="information")
+            self.dismiss(True)
+        except Exception as e:
+            self.app.notify(f"Error: {e}", severity="error")
