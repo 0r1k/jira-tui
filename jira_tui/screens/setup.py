@@ -55,7 +55,7 @@ class SetupScreen(Screen):
 
     def compose(self) -> ComposeResult:
         with Container(id="setup-box"):
-            yield Static("⚙  Jira TUI — Setup", id="setup-title")
+            yield Static("⚙  Jira TUI © or1k.net — Setup", id="setup-title")
 
             yield Label("Auth type", classes="field-label")
             yield Select(

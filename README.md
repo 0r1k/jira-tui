@@ -92,7 +92,7 @@ Press **Test & Save** to verify the connection and write the config. Press **Can
 ## Main Screen
 
 ```
-┌─ ⚡ Jira TUI ───────────────────────────────────────────────────────────┐
+┌─ ⚡ Jira TUI © or1k.net ────────────────────────────────────────────────┐
 │ Navigation       │ My Issues  (69 issues)                               │
 │  👤 My Issues    │ ┌─────────────────────────────────────────────────┐  │
 │  📋 Reported     │ │ Key      Type   Summary          Status   Pri   │  │

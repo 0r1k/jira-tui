@@ -99,7 +99,7 @@ class MainScreen(Screen):
         self._current_label = "My Issues"
 
     def compose(self) -> ComposeResult:
-        yield Static("⚡ Jira TUI", id="app-header")
+        yield Static("⚡ Jira TUI © or1k.net", id="app-header")
         with Horizontal(id="main-body"):
             with Vertical(id="sidebar"):
                 yield Static("Navigation", id="sidebar-title")
