@@ -9,6 +9,8 @@ from textual import work
 from ..client import JiraClient
 
 
+
+
 PRIORITY_ICONS = {"Highest": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🔵", "Lowest": "⚪"}
 STATUS_COLORS = {"To Do": "blue", "In Progress": "yellow", "Done": "green", "Closed": "green"}
 
@@ -19,9 +21,10 @@ class CommentBox(Vertical):
     DEFAULT_CSS = """
     CommentBox {
         background: $surface;
-        border: round $panel;
-        margin-bottom: 1;
-        padding: 1;
+        border: solid $panel;
+        margin-bottom: 0;
+        padding: 0 1;
+        height: auto;
     }
     """
 
@@ -32,8 +35,7 @@ class CommentBox(Vertical):
         self._body = body
 
     def compose(self) -> ComposeResult:
-        yield Static(f"[bold cyan]{self._author}[/]  [dim]{self._date}[/]")
-        yield Static(self._body or "_(empty)_")
+        yield Static(f"[bold cyan]{self._author}[/] [dim]{self._date}[/]  {self._body or '(empty)'}")
 
 
 class IssueDetailScreen(Screen):
@@ -41,6 +43,7 @@ class IssueDetailScreen(Screen):
         Binding("escape", "app.pop_screen", "Back", show=True),
         Binding("t", "transition", "Transition", show=True),
         Binding("c", "comment", "Comment", show=True),
+        Binding("a", "assign", "Assign", show=True),
         Binding("e", "edit_summary", "Edit Summary", show=True),
         Binding("r", "refresh", "Refresh", show=True),
     ]
@@ -69,9 +72,6 @@ class IssueDetailScreen(Screen):
         background: $surface-darken-1;
         padding: 0 2;
         border-bottom: solid $panel;
-    }
-    .meta-item {
-        margin-right: 3;
         content-align: left middle;
     }
     #body-container {
@@ -115,7 +115,7 @@ class IssueDetailScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Static(f"Loading {self._issue_key}…", id="detail-header")
-        yield Horizontal(id="meta-bar")
+        yield Static("", id="meta-bar")
         with Horizontal(id="body-container"):
             with ScrollableContainer(id="description-panel"):
                 yield Static("Description", classes="section-title")
@@ -158,13 +158,10 @@ class IssueDetailScreen(Screen):
             f"[bold cyan]{key}[/]  [bold]{summary}[/]"
         )
 
-        meta = self.query_one("#meta-bar", Horizontal)
-        meta.remove_children()
-        meta.mount(Static(f"[bold]{itype}[/]", classes="meta-item"))
-        meta.mount(Static(f"Status: [yellow]{status}[/]", classes="meta-item"))
-        meta.mount(Static(f"Priority: {icon} {priority}", classes="meta-item"))
-        meta.mount(Static(f"Assignee: [cyan]{assignee}[/]", classes="meta-item"))
-        meta.mount(Static(f"Reporter: {reporter}", classes="meta-item"))
+        self.query_one("#meta-bar", Static).update(
+            f"[bold]{itype}[/]  │  Status: [yellow]{status}[/]  │  Priority: {icon} {priority}"
+            f"  │  Assignee: [cyan]{assignee}[/]  │  Reporter: {reporter}"
+        )
 
         desc = getattr(f, "description", None) or "_No description_"
         self.query_one("#description-md", Markdown).update(desc)
@@ -174,7 +171,7 @@ class IssueDetailScreen(Screen):
         if not comments:
             comments_list.mount(Static("No comments yet.", classes="comment-date"))
         else:
-            for c in comments:
+            for c in reversed(comments):
                 author = getattr(c.author, "displayName", "?")
                 date = str(c.created)[:10]
                 body = c.body or ""
@@ -192,6 +189,14 @@ class IssueDetailScreen(Screen):
         self.app.push_screen(CommentModal(self._client, self._issue_key), self._on_commented)
 
     def _on_commented(self, _) -> None:
+        self._load_issue()
+
+    def action_assign(self) -> None:
+        if not self._issue:
+            return
+        self.app.push_screen(AssignModal(self._client, self._issue_key), self._on_assigned)
+
+    def _on_assigned(self, _) -> None:
         self._load_issue()
 
     def action_edit_summary(self) -> None:
@@ -351,6 +356,128 @@ class EditSummaryModal(Screen):
         try:
             self._client.update_issue(self._issue_key, {"summary": summary})
             self.app.notify("Summary updated", severity="information")
+            self.dismiss(True)
+        except Exception as e:
+            self.app.notify(f"Error: {e}", severity="error")
+
+
+class AssignModal(Screen):
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+
+    CSS = """
+    AssignModal { align: center middle; }
+    #assign-box {
+        width: 64; height: auto; max-height: 36;
+        border: round $accent; padding: 1 2; background: $surface;
+    }
+    .modal-title { text-align: center; text-style: bold; color: $accent; margin-bottom: 1; }
+    #user-search { width: 1fr; margin-bottom: 0; }
+    #assign-status { height: 1; color: $text-muted; }
+    #user-list {
+        height: auto;
+        max-height: 18;
+        border: solid $panel;
+        background: $background;
+        display: none;
+    }
+    #user-list.visible { display: block; }
+    .user-btn {
+        width: 1fr; height: 3; margin: 0;
+        background: $background; border: none; color: $text;
+    }
+    .user-btn:hover { background: $accent; color: $background; }
+    .user-btn:focus { background: $accent-darken-1; color: $background; }
+    #btn-row { height: 3; align: center middle; margin-top: 1; }
+    """
+
+    def __init__(self, client: JiraClient, issue_key: str, **kwargs):
+        super().__init__(**kwargs)
+        self._client = client
+        self._issue_key = issue_key
+        self._users: list[dict] = []
+        self._last_query = ""
+
+    def compose(self) -> ComposeResult:
+        with Container(id="assign-box"):
+            yield Static(f"Assign  {self._issue_key}", classes="modal-title")
+            yield Input(placeholder="Type name to search…", id="user-search")
+            yield Static("Start typing (2+ chars) to see suggestions", id="assign-status")
+            yield ScrollableContainer(id="user-list")
+            with Horizontal(id="btn-row"):
+                yield Button("Remove assignee", variant="warning", id="unassign-btn")
+                yield Button("Cancel [Esc]", variant="error", id="cancel-btn")
+
+    def on_mount(self) -> None:
+        self.query_one("#user-search", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "user-search":
+            return
+        query = event.value.strip()
+        if len(query) < 2:
+            self.query_one("#user-list", ScrollableContainer).remove_class("visible")
+            self.query_one("#assign-status", Static).update(
+                "Start typing (2+ chars) to see suggestions"
+            )
+            return
+        if query == self._last_query:
+            return
+        self._last_query = query
+        self.query_one("#assign-status", Static).update("Searching…")
+        self._search(query)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        btn_id = event.button.id or ""
+        if btn_id == "cancel-btn":
+            self.dismiss(None)
+        elif btn_id == "unassign-btn":
+            self._apply(None, None)
+        elif btn_id.startswith("user-"):
+            idx = int(btn_id[5:])
+            user = self._users[idx]
+            self._apply(user.get("accountId"), user.get("name"))
+
+    @work(thread=True)
+    def _search(self, query: str) -> None:
+        try:
+            users = self._client.search_users(query, issue_key=self._issue_key)
+            self.app.call_from_thread(self._show_users, query, users)
+        except Exception as e:
+            self.app.call_from_thread(
+                self.query_one("#assign-status", Static).update, f"Error: {e}"
+            )
+
+    def _show_users(self, query: str, users: list[dict]) -> None:
+        # Discard stale results if the user has typed ahead
+        if query != self._last_query:
+            return
+        self._users = users
+        container = self.query_one("#user-list", ScrollableContainer)
+        container.remove_children()
+        if not users:
+            self.query_one("#assign-status", Static).update("No users found")
+            container.remove_class("visible")
+            return
+        self.query_one("#assign-status", Static).update(
+            f"{len(users)} user(s) — click to assign"
+        )
+        container.add_class("visible")
+        for i, user in enumerate(users[:10]):
+            name = user.get("displayName") or user.get("name") or "?"
+            email = user.get("emailAddress", "")
+            label = f"  {name}  [{email}]" if email else f"  {name}"
+            container.mount(Button(label, id=f"user-{i}", classes="user-btn"))
+
+    def _apply(self, account_id: str | None, name: str | None) -> None:
+        try:
+            if account_id:
+                self._client.update_issue(self._issue_key, {"assignee": {"accountId": account_id}})
+            elif name:
+                self._client.update_issue(self._issue_key, {"assignee": {"name": name}})
+            else:
+                self._client.update_issue(self._issue_key, {"assignee": None})
+            msg = "Assignee removed" if not account_id and not name else "Assignee updated"
+            self.app.notify(msg, severity="information")
             self.dismiss(True)
         except Exception as e:
             self.app.notify(f"Error: {e}", severity="error")

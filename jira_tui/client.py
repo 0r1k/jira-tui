@@ -119,10 +119,26 @@ class JiraClient:
     def get_myself(self) -> dict:
         return self.jira.myself()
 
-    def search_users(self, query: str) -> list[dict]:
+    def search_users(self, query: str, issue_key: str = "") -> list[dict]:
         try:
-            users = self.jira.search_users(query)
-            return [{"accountId": u.accountId, "displayName": u.displayName} for u in users]
+            params: dict = {"query": query, "maxResults": 10}
+            if issue_key:
+                params["issueKey"] = issue_key
+                data = self._get("/rest/api/3/user/assignable/search", params=params)
+            else:
+                data = self._get("/rest/api/3/user/search", params=params)
+            if not isinstance(data, list):
+                return []
+            return [
+                {
+                    "accountId": u.get("accountId", ""),
+                    "displayName": u.get("displayName", ""),
+                    "emailAddress": u.get("emailAddress", ""),
+                    "name": u.get("name", ""),
+                }
+                for u in data
+                if u.get("accountId") or u.get("name")
+            ]
         except Exception:
             return []
 
