@@ -1,3 +1,5 @@
 /venv/
 /env/
 jira_tui/__pycache__
+**/__pycache__/
+*.pyc

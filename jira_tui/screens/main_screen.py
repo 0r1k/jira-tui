@@ -6,9 +6,46 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Sta
 from textual.widgets.tree import TreeNode
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
 from textual.binding import Binding
-from textual import work
+from textual import events, work
 from ..client import JiraClient
 from ..config import Config
+
+
+class ResizeHandle(Static):
+    """1-cell drag handle that resizes the sidebar."""
+
+    DEFAULT_CSS = """
+    ResizeHandle {
+        width: 1;
+        background: $panel;
+        color: $text-muted;
+    }
+    ResizeHandle:hover { background: $accent; color: $background; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__("▌")
+        self._dragging = False
+        self._width = 0
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        self._dragging = True
+        self._width = self.screen.query_one("#sidebar").size.width
+        self.capture_mouse()
+        event.stop()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if not self._dragging:
+            return
+        self._width = max(15, min(70, self._width + event.delta_x))
+        self.screen.query_one("#sidebar").styles.width = self._width
+        event.stop()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if self._dragging:
+            self._dragging = False
+            self.release_mouse()
+        event.stop()
 
 PRIORITY_ICONS = {"Highest": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🔵", "Lowest": "⚪"}
 
@@ -41,8 +78,7 @@ class MainScreen(Screen):
     }
 
     #sidebar {
-        width: 24;
-        border-right: solid $panel;
+        width: 31;
         background: $surface;
     }
 
@@ -105,6 +141,7 @@ class MainScreen(Screen):
             with Vertical(id="sidebar"):
                 yield Static("Navigation", id="sidebar-title")
                 yield Tree("", id="nav-tree")
+            yield ResizeHandle()
             with Vertical(id="content-panel"):
                 yield Static("My Issues", id="content-header")
                 yield Horizontal(
