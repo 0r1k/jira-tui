@@ -396,6 +396,7 @@ class AssignModal(Screen):
         self._issue_key = issue_key
         self._users: list[dict] = []
         self._last_query = ""
+        self._me: dict | None = None
 
     def compose(self) -> ComposeResult:
         with Container(id="assign-box"):
@@ -404,11 +405,21 @@ class AssignModal(Screen):
             yield Static("Start typing (2+ chars) to see suggestions", id="assign-status")
             yield ScrollableContainer(id="user-list")
             with Horizontal(id="btn-row"):
+                yield Button("Assign to me", variant="success", id="assignme-btn")
                 yield Button("Remove assignee", variant="warning", id="unassign-btn")
                 yield Button("Cancel [Esc]", variant="error", id="cancel-btn")
 
     def on_mount(self) -> None:
         self.query_one("#user-search", Input).focus()
+        self._load_me()
+
+    @work(thread=True)
+    def _load_me(self) -> None:
+        try:
+            me = self._client.get_myself()
+            self.app.call_from_thread(setattr, self, "_me", me)
+        except Exception:
+            pass
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "user-search":
@@ -430,6 +441,11 @@ class AssignModal(Screen):
         btn_id = event.button.id or ""
         if btn_id == "cancel-btn":
             self.dismiss(None)
+        elif btn_id == "assignme-btn":
+            if self._me:
+                self._apply(self._me.get("accountId"), self._me.get("name"))
+            else:
+                self.app.notify("Could not load current user", severity="warning")
         elif btn_id == "unassign-btn":
             self._apply(None, None)
         elif btn_id.startswith("user-"):
