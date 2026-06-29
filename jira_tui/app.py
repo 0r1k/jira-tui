@@ -1,3 +1,4 @@
+# Copyright (c) 2026 or1k.net
 from textual.app import App
 from .config import Config
 from .client import JiraClient

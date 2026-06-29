@@ -1,3 +1,4 @@
+# Copyright (c) 2026 or1k.net
 from __future__ import annotations
 from typing import Any
 from jira import JIRA, JIRAError

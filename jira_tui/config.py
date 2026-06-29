@@ -1,3 +1,4 @@
+# Copyright (c) 2026 or1k.net
 import json
 import os
 from pathlib import Path

@@ -276,3 +276,7 @@ Your account does not have the "Create Issues" permission in that project. Choos
 
 **Issue types not loading**
 Select a project first — issue types are loaded on demand after a project is chosen.
+
+---
+
+© 2026 [or1k.net](https://or1k.net)

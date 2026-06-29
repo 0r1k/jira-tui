@@ -1,3 +1,4 @@
+# Copyright (c) 2026 or1k.net
 from __future__ import annotations
 from textual.app import ComposeResult
 from textual.screen import Screen
