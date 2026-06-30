@@ -1,5 +1,7 @@
 # Copyright (c) 2026 or1k.net
 from textual.app import App
+from textual.binding import Binding
+from textual.widgets import Input, TextArea
 from .config import Config
 from .client import JiraClient
 
@@ -7,6 +9,14 @@ from .client import JiraClient
 class JiraTuiApp(App):
     TITLE = "Jira TUI"
     CSS = ""
+    BINDINGS = [
+        Binding("ctrl+a", "select_all_focused", show=False, priority=True),
+    ]
+
+    def action_select_all_focused(self) -> None:
+        focused = self.focused
+        if isinstance(focused, (Input, TextArea)):
+            focused.action_select_all()
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
