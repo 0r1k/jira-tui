@@ -20,7 +20,7 @@ class CreateIssueScreen(Screen):
     #create-box {
         width: 72;
         height: auto;
-        max-height: 38;
+        max-height: 50;
         border: round $accent;
         background: $surface;
     }
@@ -30,9 +30,24 @@ class CreateIssueScreen(Screen):
         color: $accent;
         padding: 1 2 0 2;
     }
-    #form-scroll { height: 28; padding: 1 2; }
+    #form-scroll { height: 30; padding: 1 2; }
     .field-label { color: $text-muted; margin-top: 1; }
     #description-area { height: 7; }
+
+    #assignee-dropdown {
+        height: auto;
+        max-height: 10;
+        border: solid $panel;
+        background: $background;
+        margin: 0 2;
+    }
+    .assignee-btn {
+        width: 1fr; height: 3; margin: 0;
+        background: $background; border: none; color: $text;
+    }
+    .assignee-btn:hover { background: $accent; color: $background; }
+    #assignee-status { height: 1; color: $text-muted; padding: 0 2; }
+
     #error-msg { color: $error; padding: 0 2; height: 1; }
     #btn-row { height: 3; align: center middle; padding: 0 2 1 2; }
     """
@@ -42,6 +57,10 @@ class CreateIssueScreen(Screen):
         self._client = client
         self._projects = projects
         self._issue_types: list[dict] = []
+        self._assignee_id: str = ""
+        self._assignee_search: str = ""
+        self._assignee_users: list[dict] = []
+        self._selecting: bool = False
 
     def compose(self) -> ComposeResult:
         with Container(id="create-box"):
@@ -68,13 +87,23 @@ class CreateIssueScreen(Screen):
                     id="priority-select",
                 )
 
-                yield Label("Assignee (email/username)", classes="field-label")
-                yield Input(id="assignee-input", placeholder="leave empty for unassigned")
+                yield Label("Assignee", classes="field-label")
+                yield Input(id="assignee-input", placeholder="Type 2+ chars to search…")
+
+            # Suggestions live OUTSIDE form-scroll so they're always visible
+            yield Static("", id="assignee-status")
+            yield ScrollableContainer(id="assignee-dropdown")
 
             yield Static("", id="error-msg")
             with Horizontal(id="btn-row"):
                 yield Button("Create [Ctrl+S]", variant="primary", id="create-btn")
                 yield Button("Cancel [Esc]", variant="error", id="cancel-btn")
+
+    def on_mount(self) -> None:
+        self.query_one("#assignee-dropdown", ScrollableContainer).display = False
+        self.query_one("#assignee-status", Static).display = False
+
+    # ── Project / type loading ────────────────────────────────────────────────
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "project-select" and event.value is not Select.BLANK:
@@ -103,11 +132,91 @@ class CreateIssueScreen(Screen):
         sel = self.query_one("#type-select", Select)
         sel.set_options([(t["name"], t["id"]) for t in types])
 
+    # ── Assignee live search ──────────────────────────────────────────────────
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "assignee-input":
+            return
+        if self._selecting:
+            return
+        self._assignee_id = ""
+        query = event.value.strip()
+        status = self.query_one("#assignee-status", Static)
+        dropdown = self.query_one("#assignee-dropdown", ScrollableContainer)
+        if len(query) < 2:
+            self._assignee_search = ""  # reject any in-flight results
+            dropdown.display = False
+            status.display = False
+            return
+        if query == self._assignee_search:
+            return
+        self._assignee_search = query
+        # hide immediately while new search is running
+        dropdown.display = False
+        dropdown.remove_children()
+        status.update("Searching…")
+        status.display = True
+        # read project key on the main thread
+        project_key = ""
+        try:
+            val = self.query_one("#project-select", Select).value
+            if val is not Select.BLANK:
+                project_key = str(val)
+        except Exception:
+            pass
+        self._search_assignee(query, project_key)
+
+    @work(thread=True)
+    def _search_assignee(self, query: str, project_key: str) -> None:
+        try:
+            users = self._client.search_users(query, project_key=project_key)
+            # fallback: try general search if assignable returned nothing
+            if not users and project_key:
+                users = self._client.search_users(query)
+            self.app.call_from_thread(self._show_suggestions, query, users)
+        except Exception as e:
+            self.app.call_from_thread(
+                self.query_one("#assignee-status", Static).update, f"Search error: {e}"
+            )
+
+    def _show_suggestions(self, query: str, users: list[dict]) -> None:
+        if query != self._assignee_search:
+            return
+        self._assignee_users = users
+        status = self.query_one("#assignee-status", Static)
+        dropdown = self.query_one("#assignee-dropdown", ScrollableContainer)
+        dropdown.remove_children()
+        if not users:
+            status.update("No users found")
+            dropdown.display = False
+            return
+        status.display = False
+        dropdown.display = True
+        for i, user in enumerate(users[:8]):
+            name = user.get("displayName") or user.get("name") or "?"
+            email = user.get("emailAddress", "")
+            label = f"  {name}  [{email}]" if email else f"  {name}"
+            dropdown.mount(Button(label, id=f"asgn-{i}", classes="assignee-btn"))
+
+    # ── Button handler ────────────────────────────────────────────────────────
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "create-btn":
+        btn_id = event.button.id or ""
+        if btn_id == "create-btn":
             self.action_submit()
-        elif event.button.id == "cancel-btn":
+        elif btn_id == "cancel-btn":
             self.dismiss(None)
+        elif btn_id.startswith("asgn-"):
+            idx = int(btn_id[5:])
+            user = self._assignee_users[idx]
+            self._assignee_id = user.get("accountId", "")
+            name = user.get("displayName") or user.get("name") or ""
+            self._selecting = True
+            self.query_one("#assignee-input", Input).value = name
+            self._selecting = False
+            self._assignee_search = name  # prevent re-search if user re-types same string
+            self.query_one("#assignee-dropdown", ScrollableContainer).display = False
+            self.query_one("#assignee-status", Static).display = False
 
     def action_submit(self) -> None:
         error = self.query_one("#error-msg", Static)
@@ -118,7 +227,6 @@ class CreateIssueScreen(Screen):
         summary = self.query_one("#summary-input", Input).value.strip()
         description = self.query_one("#description-area", TextArea).text.strip()
         priority = str(self.query_one("#priority-select", Select).value)
-        assignee_raw = self.query_one("#assignee-input", Input).value.strip()
 
         if not project_key or str(project_key) == "Select.BLANK":
             error.update("Project is required")
@@ -139,13 +247,8 @@ class CreateIssueScreen(Screen):
             fields["description"] = description
         if priority:
             fields["priority"] = {"name": priority}
-        if assignee_raw:
-            # Try accountId first (Cloud), fall back to name (Server)
-            users = self._client.search_users(assignee_raw)
-            if users:
-                fields["assignee"] = {"accountId": users[0]["accountId"]}
-            else:
-                fields["assignee"] = {"name": assignee_raw}
+        if self._assignee_id:
+            fields["assignee"] = {"accountId": self._assignee_id}
 
         try:
             issue = self._client.create_issue(fields)

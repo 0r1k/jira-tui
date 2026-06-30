@@ -119,11 +119,14 @@ class JiraClient:
     def get_myself(self) -> dict:
         return self.jira.myself()
 
-    def search_users(self, query: str, issue_key: str = "") -> list[dict]:
+    def search_users(self, query: str, issue_key: str = "", project_key: str = "") -> list[dict]:
         try:
             params: dict = {"query": query, "maxResults": 10}
             if issue_key:
                 params["issueKey"] = issue_key
+                data = self._get("/rest/api/3/user/assignable/search", params=params)
+            elif project_key:
+                params["project"] = project_key
                 data = self._get("/rest/api/3/user/assignable/search", params=params)
             else:
                 data = self._get("/rest/api/3/user/search", params=params)
