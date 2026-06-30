@@ -8,7 +8,7 @@ from textual.containers import Container, Horizontal, Vertical, ScrollableContai
 from textual.binding import Binding
 from textual import events, work
 from ..client import JiraClient
-from ..config import Config
+from ..config import JiraConfig, MultiConfig
 
 
 class ResizeHandle(Static):
@@ -127,13 +127,15 @@ class MainScreen(Screen):
     }
     """
 
-    def __init__(self, client: JiraClient, config: Config, **kwargs):
+    def __init__(self, clients: list[tuple[JiraClient, JiraConfig]],
+                 multi_config: MultiConfig, **kwargs):
         super().__init__(**kwargs)
-        self._client = client
-        self._config = config
-        self._projects: list[dict] = []
-        self._current_view = "my_issues"
-        self._current_label = "My Issues"
+        self._clients = clients
+        self._multi_config = multi_config
+        self._projects_per_client: dict[int, list[dict]] = {}
+        self._current_client_idx: int = 0
+        self._current_view: str = "0:my_issues"
+        self._current_label: str = "My Issues"
 
     def compose(self) -> ComposeResult:
         yield Static("⚡ Jira TUI © or1k.net", id="app-header")
@@ -155,7 +157,8 @@ class MainScreen(Screen):
         table = self.query_one("#issues-table", DataTable)
         table.add_columns("Key", "Type", "Summary", "Status", "Priority", "Assignee", "Updated")
         self._build_nav()
-        self._load_my_issues()
+        if self._clients:
+            self._load_issues(0, "assignee = currentUser() ORDER BY updated DESC")
 
     # ── Nav tree ─────────────────────────────────────────────────────────────
 
@@ -165,26 +168,46 @@ class MainScreen(Screen):
         root = tree.root
         root.expand()
 
-        me_node = root.add("👤 My Issues", data={"type": "my_issues"})
-        root.add("📋 Reported by me", data={"type": "reported_by_me"})
-        root.add("👀 Watching", data={"type": "watching"})
-        root.add("🔍 Search (JQL)", data={"type": "jql_search"})
-
-        projects_node = root.add("📁 Projects", data={"type": "header"})
-        self._load_projects_into_tree(projects_node)
+        for idx, (client, jcfg) in enumerate(self._clients):
+            domain = jcfg.name
+            jira_node = root.add(
+                f"● {domain}", data={"type": "jira_root", "client_idx": idx}
+            )
+            jira_node.add_leaf(
+                "👤 My Issues", data={"type": "my_issues", "client_idx": idx}
+            )
+            jira_node.add_leaf(
+                "📋 Reported by me", data={"type": "reported_by_me", "client_idx": idx}
+            )
+            jira_node.add_leaf(
+                "👀 Watching", data={"type": "watching", "client_idx": idx}
+            )
+            jira_node.add_leaf(
+                "🔍 Search (JQL)", data={"type": "jql_search", "client_idx": idx}
+            )
+            projects_node = jira_node.add(
+                "📁 Projects", data={"type": "projects_header", "client_idx": idx}
+            )
+            self._load_projects_into_tree(idx, projects_node)
+            jira_node.expand()
 
     @work(thread=True)
-    def _load_projects_into_tree(self, node: TreeNode) -> None:
+    def _load_projects_into_tree(self, client_idx: int, node: TreeNode) -> None:
         try:
-            projects = self._client.get_projects()
-            self.app.call_from_thread(self._add_projects_to_tree, node, projects)
+            client = self._clients[client_idx][0]
+            projects = client.get_projects()
+            self.app.call_from_thread(self._add_projects_to_tree, client_idx, node, projects)
         except Exception:
             pass
 
-    def _add_projects_to_tree(self, node: TreeNode, projects: list[dict]) -> None:
-        self._projects = projects
-        for p in projects[:30]:  # cap at 30 to avoid huge trees
-            node.add_leaf(f"{p['key']}  {p['name']}", data={"type": "project", "key": p["key"]})
+    def _add_projects_to_tree(self, client_idx: int, node: TreeNode,
+                               projects: list[dict]) -> None:
+        self._projects_per_client[client_idx] = projects
+        for p in projects[:30]:
+            node.add_leaf(
+                f"{p['key']}  {p['name']}",
+                data={"type": "project", "client_idx": client_idx, "key": p["key"]},
+            )
         node.expand()
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
@@ -192,41 +215,47 @@ class MainScreen(Screen):
         if not data:
             return
         t = data.get("type")
+        if t in ("jira_root", "projects_header"):
+            return
+
+        client_idx: int = data.get("client_idx", 0)
+        self._current_client_idx = client_idx
+
         if t == "my_issues":
-            self._current_view = "my_issues"
+            self._current_view = f"{client_idx}:my_issues"
             self._current_label = "My Issues"
-            self._load_my_issues()
+            self._load_issues(client_idx, "assignee = currentUser() ORDER BY updated DESC")
         elif t == "reported_by_me":
-            self._current_view = "reported_by_me"
+            self._current_view = f"{client_idx}:reported_by_me"
             self._current_label = "Reported by Me"
-            self._load_issues("reporter = currentUser() ORDER BY updated DESC")
+            self._load_issues(client_idx, "reporter = currentUser() ORDER BY updated DESC")
         elif t == "watching":
-            self._current_view = "watching"
+            self._current_view = f"{client_idx}:watching"
             self._current_label = "Watching"
-            self._load_issues("watcher = currentUser() ORDER BY updated DESC")
+            self._load_issues(client_idx, "watcher = currentUser() ORDER BY updated DESC")
         elif t == "jql_search":
             self.action_search()
         elif t == "project":
             key = data["key"]
-            self._current_view = f"project:{key}"
+            self._current_view = f"{client_idx}:project:{key}"
             self._current_label = f"Project: {key}"
-            self._load_issues(f"project = {key} ORDER BY updated DESC")
+            self._load_issues(client_idx, f"project = {key} ORDER BY updated DESC")
 
     # ── Issue loading ─────────────────────────────────────────────────────────
 
-    def _load_my_issues(self) -> None:
-        self._load_issues("assignee = currentUser() ORDER BY updated DESC")
-
-    def _load_issues(self, jql: str) -> None:
-        self.query_one("#content-header", Static).update(f"{self._current_label}  [dim]loading…[/]")
+    def _load_issues(self, client_idx: int, jql: str) -> None:
+        self.query_one("#content-header", Static).update(
+            f"{self._current_label}  [dim]loading…[/]"
+        )
         table = self.query_one("#issues-table", DataTable)
         table.clear()
-        self._fetch_issues(jql)
+        self._fetch_issues(client_idx, jql)
 
     @work(thread=True)
-    def _fetch_issues(self, jql: str) -> None:
+    def _fetch_issues(self, client_idx: int, jql: str) -> None:
         try:
-            issues = self._client.search_issues(jql, max_results=100)
+            client = self._clients[client_idx][0]
+            issues = client.search_issues(jql, max_results=100)
             self.app.call_from_thread(self._populate_table, issues)
         except Exception as e:
             self.app.call_from_thread(
@@ -262,6 +291,9 @@ class MainScreen(Screen):
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
+    def _current_client(self) -> JiraClient:
+        return self._clients[self._current_client_idx][0]
+
     def action_open_issue(self) -> None:
         table = self.query_one("#issues-table", DataTable)
         if table.row_count == 0:
@@ -270,45 +302,74 @@ class MainScreen(Screen):
             row_key = table.get_row_at(table.cursor_row)
             issue_key = str(row_key[0])
             from .issue_detail import IssueDetailScreen
-            self.app.push_screen(IssueDetailScreen(self._client, issue_key))
+            self.app.push_screen(IssueDetailScreen(self._current_client(), issue_key))
         except Exception:
             pass
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         issue_key = str(event.row_key.value)
         from .issue_detail import IssueDetailScreen
-        self.app.push_screen(IssueDetailScreen(self._client, issue_key))
+        self.app.push_screen(IssueDetailScreen(self._current_client(), issue_key))
 
     def action_new_issue(self) -> None:
+        if not self._clients:
+            self.app.notify("No Jira instances configured", severity="warning")
+            return
+        projects = self._projects_per_client.get(self._current_client_idx, [])
         from .create_issue import CreateIssueScreen
         self.app.push_screen(
-            CreateIssueScreen(self._client, self._projects),
+            CreateIssueScreen(self._current_client(), projects),
             self._on_issue_created,
         )
 
     def _on_issue_created(self, issue_key) -> None:
         if issue_key:
             from .issue_detail import IssueDetailScreen
-            self.app.push_screen(IssueDetailScreen(self._client, issue_key))
+            self.app.push_screen(IssueDetailScreen(self._current_client(), issue_key))
 
     def action_search(self) -> None:
+        if not self._clients:
+            return
         from .search_screen import SearchScreen
-        self.app.push_screen(SearchScreen(self._client))
+        self.app.push_screen(SearchScreen(self._current_client()))
 
     def action_refresh(self) -> None:
-        if self._current_view == "my_issues":
-            self._load_my_issues()
-        elif self._current_view == "reported_by_me":
-            self._load_issues("reporter = currentUser() ORDER BY updated DESC")
-        elif self._current_view == "watching":
-            self._load_issues("watcher = currentUser() ORDER BY updated DESC")
-        elif self._current_view.startswith("project:"):
-            key = self._current_view.split(":", 1)[1]
-            self._load_issues(f"project = {key} ORDER BY updated DESC")
+        view = self._current_view
+        parts = view.split(":", 2)
+        if len(parts) < 2:
+            return
+        try:
+            client_idx = int(parts[0])
+        except ValueError:
+            return
+        view_type = parts[1]
+        if view_type == "my_issues":
+            self._load_issues(client_idx, "assignee = currentUser() ORDER BY updated DESC")
+        elif view_type == "reported_by_me":
+            self._load_issues(client_idx, "reporter = currentUser() ORDER BY updated DESC")
+        elif view_type == "watching":
+            self._load_issues(client_idx, "watcher = currentUser() ORDER BY updated DESC")
+        elif view_type == "project" and len(parts) == 3:
+            key = parts[2]
+            self._load_issues(client_idx, f"project = {key} ORDER BY updated DESC")
 
     def action_setup(self) -> None:
-        from .setup import SetupScreen
-        self.app.push_screen(SetupScreen(self._config))
+        from .setup import JiraListScreen
+        self.app.push_screen(JiraListScreen(self._multi_config), self._on_setup_done)
+
+    def _on_setup_done(self, _) -> None:
+        self._clients = [
+            (JiraClient(jcfg), jcfg)
+            for jcfg in self._multi_config.jiras
+            if jcfg.is_configured()
+        ]
+        self._projects_per_client = {}
+        self._build_nav()
+        if self._clients:
+            self._current_client_idx = 0
+            self._current_view = "0:my_issues"
+            self._current_label = "My Issues"
+            self._load_issues(0, "assignee = currentUser() ORDER BY updated DESC")
 
     def action_quit(self) -> None:
         self.app.exit()
@@ -338,7 +399,7 @@ class HelpScreen(Screen):
                 ("n", "New issue"),
                 ("f", "Search / JQL"),
                 ("r", "Refresh current view"),
-                ("s", "Settings / auth"),
+                ("s", "Settings / connections"),
                 ("Enter", "Open selected issue"),
                 ("q", "Quit"),
                 ("?", "This help"),
@@ -346,6 +407,7 @@ class HelpScreen(Screen):
                 ("Issue detail", ""),
                 ("t", "Transition status"),
                 ("c", "Add comment"),
+                ("a", "Assign"),
                 ("e", "Edit summary"),
                 ("r", "Refresh issue"),
                 ("Esc", "Go back"),

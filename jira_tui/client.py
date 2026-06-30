@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import Any
 from jira import JIRA, JIRAError
 from jira.resources import Issue
-from .config import Config
+from .config import JiraConfig
 
 
 class JiraClient:
-    def __init__(self, config: Config):
+    def __init__(self, config: JiraConfig):
         self._config = config
         self._jira: JIRA | None = None
 
