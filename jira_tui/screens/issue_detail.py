@@ -224,6 +224,13 @@ class TransitionModal(Screen):
     #modal-box { width: 50; height: auto; border: round $accent; padding: 1 2; background: $surface; }
     .modal-title { text-align: center; text-style: bold; color: $accent; margin-bottom: 1; }
     #cancel-row { height: 3; align: center middle; margin-top: 1; }
+    .tr-btn {
+        width: 1fr; height: 3; margin: 0 0 1 0;
+        background: $panel; border: tall $accent; color: $text;
+        text-align: center;
+    }
+    .tr-btn:hover { background: $accent; color: $background; }
+    .tr-btn:focus { background: $accent-darken-1; color: $background; }
     """
 
     def __init__(self, client: JiraClient, issue_key: str, **kwargs):
@@ -252,9 +259,10 @@ class TransitionModal(Screen):
         cancel_row = self.query_one("#cancel-row", Horizontal)
         container = self.query_one("#modal-box", Container)
         for t in transitions:
-            btn = Button(t["name"], id=f"tr-{t['id']}", variant="default")
-            btn.styles.margin = (0, 0, 1, 0)
-            container.mount(btn, before=cancel_row)
+            container.mount(
+                Button(t["name"], id=f"tr-{t['id']}", classes="tr-btn"),
+                before=cancel_row,
+            )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""

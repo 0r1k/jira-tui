@@ -17,7 +17,7 @@ class JiraConfig:
 
     @property
     def name(self) -> str:
-        """Domain label without scheme, e.g. 'spalah-general.atlassian.net'."""
+        """Domain label without scheme, e.g. 'yourcompany.atlassian.net'."""
         url = self.jira_url
         for prefix in ("https://", "http://"):
             if url.startswith(prefix):
