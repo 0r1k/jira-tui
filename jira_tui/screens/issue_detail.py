@@ -163,7 +163,12 @@ class IssueDetailScreen(Screen):
             f"  │  Assignee: [cyan]{assignee}[/]  │  Reporter: {reporter}"
         )
 
-        desc = getattr(f, "description", None) or "_No description_"
+        desc = getattr(f, "description", None)
+        if not desc:
+            desc = "_No description_"
+        elif isinstance(desc, str):
+            # Jira stores line breaks as \n; Markdown needs trailing spaces for hard breaks
+            desc = desc.replace("\n", "  \n")
         self.query_one("#description-md", Markdown).update(desc)
 
         comments_list = self.query_one("#comments-list", Vertical)

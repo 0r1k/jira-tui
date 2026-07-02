@@ -145,6 +145,47 @@ class JiraClient:
         except Exception:
             return []
 
+    # ── Jira Service Management ──────────────────────────────────────────────
+
+    def get_service_desk_for_project(self, project_key: str) -> str | None:
+        """Return service desk ID if the project is a JSM service desk, else None."""
+        try:
+            data = self._get("/rest/servicedeskapi/servicedesk", params={"start": 0, "limit": 100})
+            for desk in data.get("values", []):
+                if desk.get("projectKey") == project_key:
+                    return str(desk["id"])
+            return None
+        except Exception:
+            return None
+
+    def get_request_types(self, service_desk_id: str) -> list[dict]:
+        try:
+            data = self._get(
+                f"/rest/servicedeskapi/servicedesk/{service_desk_id}/requesttype",
+                params={"start": 0, "limit": 100},
+            )
+            return [{"id": str(rt["id"]), "name": rt["name"]} for rt in data.get("values", [])]
+        except Exception:
+            return []
+
+    def create_service_desk_request(self, service_desk_id: str, request_type_id: str,
+                                    summary: str, description: str = "") -> Any:
+        # Only send summary/description — each request type has its own allowed fields;
+        # priority, assignee, etc. are set via update_issue after creation.
+        payload: dict = {
+            "serviceDeskId": service_desk_id,
+            "requestTypeId": request_type_id,
+            "requestFieldValues": {"summary": summary},
+        }
+        if description:
+            payload["requestFieldValues"]["description"] = description
+        data = self._post("/rest/servicedeskapi/request", payload)
+        return _IssueProxy({
+            "key": data.get("issueKey", ""),
+            "id": data.get("issueId", ""),
+            "fields": {},
+        })
+
     # ── Issue Meta ───────────────────────────────────────────────────────────
 
     def get_issue_types(self, project_key: str) -> list[dict]:

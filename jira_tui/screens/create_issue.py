@@ -58,9 +58,12 @@ class CreateIssueScreen(Screen):
         self._projects = projects
         self._issue_types: list[dict] = []
         self._assignee_id: str = ""
+        self._assignee_name: str = ""
         self._assignee_search: str = ""
         self._assignee_users: list[dict] = []
         self._selecting: bool = False
+        self._service_desk_id: str = ""
+        self._request_type_id: str = ""
 
     def compose(self) -> ComposeResult:
         with Container(id="create-box"):
@@ -70,8 +73,11 @@ class CreateIssueScreen(Screen):
                 options = [(f"{p['key']} — {p['name']}", p["key"]) for p in self._projects]
                 yield Select(options, id="project-select", prompt="Select project…")
 
-                yield Label("Issue Type *", classes="field-label")
+                yield Label("Issue Type *", classes="field-label", id="type-label")
                 yield Select([], id="type-select", prompt="Select type…")
+
+                yield Label("Request Type", classes="field-label", id="rt-label")
+                yield Select([], id="rt-select", prompt="None (regular issue)")
 
                 yield Label("Summary *", classes="field-label")
                 yield Input(id="summary-input", placeholder="Brief one-line summary")
@@ -102,12 +108,34 @@ class CreateIssueScreen(Screen):
     def on_mount(self) -> None:
         self.query_one("#assignee-dropdown", ScrollableContainer).display = False
         self.query_one("#assignee-status", Static).display = False
+        # Request Type is hidden until a JSM project is selected
+        self.query_one("#rt-label", Label).display = False
+        self.query_one("#rt-select", Select).display = False
 
-    # ── Project / type loading ────────────────────────────────────────────────
+    # ── Project / type / request type loading ─────────────────────────────────
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "project-select" and event.value is not Select.BLANK:
-            self._load_issue_types(str(event.value))
+            project_key = str(event.value)
+            self._service_desk_id = ""
+            self._request_type_id = ""
+            self._hide_request_types()
+            self._load_issue_types(project_key)
+            self._load_service_desk(project_key)
+        elif event.select.id == "rt-select":
+            if event.value is not Select.BLANK:
+                self._request_type_id = str(event.value)
+                self.query_one("#type-label", Label).update("Issue Type")
+            else:
+                self._request_type_id = ""
+                self.query_one("#type-label", Label).update("Issue Type *")
+
+    def _hide_request_types(self) -> None:
+        self.query_one("#rt-label", Label).display = False
+        rt = self.query_one("#rt-select", Select)
+        rt.display = False
+        rt.set_options([])
+        self.query_one("#type-label", Label).update("Issue Type *")
 
     @work(thread=True)
     def _load_issue_types(self, project_key: str) -> None:
@@ -132,6 +160,25 @@ class CreateIssueScreen(Screen):
         sel = self.query_one("#type-select", Select)
         sel.set_options([(t["name"], t["id"]) for t in types])
 
+    @work(thread=True)
+    def _load_service_desk(self, project_key: str) -> None:
+        desk_id = self._client.get_service_desk_for_project(project_key)
+        if not desk_id:
+            return
+        rt = self._client.get_request_types(desk_id)
+        self.app.call_from_thread(self._populate_request_types, desk_id, rt)
+
+    def _populate_request_types(self, desk_id: str, types: list[dict]) -> None:
+        if not types:
+            return
+        self._service_desk_id = desk_id
+        rt_sel = self.query_one("#rt-select", Select)
+        rt_sel.set_options([(t["name"], t["id"]) for t in types])
+        self.query_one("#rt-label", Label).display = True
+        rt_sel.display = True
+        # Issue Type becomes optional when a request type can be chosen instead
+        self.query_one("#type-label", Label).update("Issue Type")
+
     # ── Assignee live search ──────────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -140,23 +187,22 @@ class CreateIssueScreen(Screen):
         if self._selecting:
             return
         self._assignee_id = ""
+        self._assignee_name = ""
         query = event.value.strip()
         status = self.query_one("#assignee-status", Static)
         dropdown = self.query_one("#assignee-dropdown", ScrollableContainer)
         if len(query) < 2:
-            self._assignee_search = ""  # reject any in-flight results
+            self._assignee_search = ""
             dropdown.display = False
             status.display = False
             return
         if query == self._assignee_search:
             return
         self._assignee_search = query
-        # hide immediately while new search is running
         dropdown.display = False
         dropdown.remove_children()
         status.update("Searching…")
         status.display = True
-        # read project key on the main thread
         project_key = ""
         try:
             val = self.query_one("#project-select", Select).value
@@ -170,7 +216,6 @@ class CreateIssueScreen(Screen):
     def _search_assignee(self, query: str, project_key: str) -> None:
         try:
             users = self._client.search_users(query, project_key=project_key)
-            # fallback: try general search if assignable returned nothing
             if not users and project_key:
                 users = self._client.search_users(query)
             self.app.call_from_thread(self._show_suggestions, query, users)
@@ -210,11 +255,12 @@ class CreateIssueScreen(Screen):
             idx = int(btn_id[5:])
             user = self._assignee_users[idx]
             self._assignee_id = user.get("accountId", "")
-            name = user.get("displayName") or user.get("name") or ""
+            self._assignee_name = user.get("name", "")
+            name = user.get("displayName") or self._assignee_name or "?"
             self._selecting = True
             self.query_one("#assignee-input", Input).value = name
             self._selecting = False
-            self._assignee_search = name  # prevent re-search if user re-types same string
+            self._assignee_search = name
             self.query_one("#assignee-dropdown", ScrollableContainer).display = False
             self.query_one("#assignee-status", Static).display = False
 
@@ -231,16 +277,59 @@ class CreateIssueScreen(Screen):
         if not project_key or str(project_key) == "Select.BLANK":
             error.update("Project is required")
             return
-        if not issue_type_id or str(issue_type_id) == "Select.BLANK":
-            error.update("Issue type is required")
-            return
         if not summary:
             error.update("Summary is required")
             return
+        # Issue Type required only when no Request Type chosen
+        if not self._request_type_id:
+            if not issue_type_id or str(issue_type_id) == "Select.BLANK":
+                error.update("Issue type is required (or choose a Request Type)")
+                return
 
+        if self._service_desk_id and self._request_type_id:
+            self._submit_service_desk(summary, description, priority)
+        else:
+            self._submit_regular(
+                str(project_key), str(issue_type_id), summary, description, priority
+            )
+
+    def _submit_service_desk(self, summary: str, description: str, priority: str) -> None:
+        error = self.query_one("#error-msg", Static)
+        try:
+            issue = self._client.create_service_desk_request(
+                service_desk_id=self._service_desk_id,
+                request_type_id=self._request_type_id,
+                summary=summary,
+                description=description,
+            )
+            if not issue.key:
+                error.update("Created but no issue key returned")
+                return
+            # Priority and assignee are set via update after creation —
+            # the service desk API only accepts fields defined for the specific request type.
+            extra: dict = {}
+            if priority:
+                extra["priority"] = {"name": priority}
+            if self._assignee_id:
+                extra["assignee"] = {"accountId": self._assignee_id}
+            elif self._assignee_name:
+                extra["assignee"] = {"name": self._assignee_name}
+            if extra:
+                try:
+                    self._client.update_issue(issue.key, extra)
+                except Exception:
+                    pass
+            self.app.notify(f"Created {issue.key}", severity="information")
+            self.dismiss(issue.key)
+        except Exception as e:
+            error.update(f"Error: {e}")
+
+    def _submit_regular(self, project_key: str, issue_type_id: str,
+                        summary: str, description: str, priority: str) -> None:
+        error = self.query_one("#error-msg", Static)
         fields: dict = {
-            "project": {"key": str(project_key)},
-            "issuetype": {"id": str(issue_type_id)},
+            "project": {"key": project_key},
+            "issuetype": {"id": issue_type_id},
             "summary": summary,
         }
         if description:
@@ -249,7 +338,8 @@ class CreateIssueScreen(Screen):
             fields["priority"] = {"name": priority}
         if self._assignee_id:
             fields["assignee"] = {"accountId": self._assignee_id}
-
+        elif self._assignee_name:
+            fields["assignee"] = {"name": self._assignee_name}
         try:
             issue = self._client.create_issue(fields)
             self.app.notify(f"Created {issue.key}", severity="information")
